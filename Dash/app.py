@@ -1,3 +1,8 @@
+# 取得 kpi_definitions df（含圖片路徑）
+def get_kpi_definitions_df():
+    with engine.connect() as connection:
+        df = pd.read_sql("SELECT KpiDefID, FAB, GroupName, ChartName, ChartType, HL_CHI, HL_Bimode, HL_PartRisk, HL_Kshift, HL_Zombie, ChartImagePath FROM kpi_definitions", connection)
+    return df
 import dash
 from dash import dcc, html, Input, Output, State, dash_table, callback
 from dash.exceptions import PreventUpdate
@@ -579,6 +584,7 @@ app.layout = html.Div([
                         dbc.Nav(
                             [
                                 dbc.NavItem(dbc.NavLink("主頁面", href="/", active="exact")),
+                                dbc.NavItem(dbc.NavLink("外部專用", href="/external", active="exact")),
                                 dbc.NavItem(dbc.NavLink(html.Span(id='navbar-username', className="ms-2 me-2 fs-6 fw-bold text-light"), href="#")),
                                 dbc.DropdownMenu(
                                     children=[
@@ -604,6 +610,7 @@ app.layout = html.Div([
             className="shadow-sm mb-4",
             style={"paddingLeft": "0", "paddingRight": "0", "minHeight": "56px"}
         ),
+        dcc.Location(id='url', refresh=False),
         dbc.Container(id='page-content', fluid=True)
     ]),
 
@@ -646,7 +653,98 @@ app.layout = html.Div([
     ], id="reply-modal", is_open=False, size="xl", style={"maxWidth": "1600px", "width": "99vw", "minWidth": "900px"})
 ])
 
+
+# --- 外部專用頁面內容 ---
+
+# 取得 kpi_definitions 資料表內容
+def get_kpi_definitions_table():
+    df = get_kpi_definitions_df()
+    return dash_table.DataTable(
+        id='external-kpi-table',
+        columns=[{"name": i, "id": i} for i in df.columns],
+        data=df.to_dict('records'), 
+        page_size=10,
+        row_selectable='single',
+        selected_rows=[0],
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left', 'padding': '5px'},
+        style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+    )
+
+external_layout = dbc.Container([
+    # --- 外部專用頁面 ---
+    # 加入隱藏的 kpi-table-container，避免 callback 報錯
+    html.Div(id='kpi-table-container', style={'display': 'none'}),
+    dcc.Dropdown(id='fac-selector', style={'display': 'none'}),
+    dcc.Dropdown(id='module-filter', style={'display': 'none'}),
+    dcc.Dropdown(id='groupname-filter', style={'display': 'none'}),
+    dcc.Dropdown(id='chartname-filter', style={'display': 'none'}),
+    dcc.Dropdown(id='charttype-filter', style={'display': 'none'}),
+    html.Div(id='dashboard-placeholder', style={'display': 'none'}),
+    dbc.Row([
+        dbc.Col([
+            html.H4("SPC Chart", className="mb-3 mt-3 text-primary fw-bold"),
+            html.Div(id='external-spc-chart-area'),
+        ], width=7),
+        dbc.Col([
+            html.H4("Chart Table Detail", className="mb-3 mt-3 text-primary fw-bold"),
+            get_kpi_definitions_table(),
+        ], width=5)
+    ], className="g-4")
+], fluid=True)
+
 # --- Callbacks ---
+# 切換不同頁面內容
+
+
+# 合併 page-content 控制，根據登入狀態與路徑切換內容
+@callback(
+    Output('navbar-username', 'children'),
+    Output('page-content', 'children'),
+    Input('login-user', 'data'),
+    Input('url', 'pathname'),
+    prevent_initial_call=False
+)
+def display_page(user, pathname):
+    if not user:
+        return "", html.Div()
+    if pathname == '/external':
+        # 預設顯示第一筆圖
+        df = get_kpi_definitions_df()
+        if not df.empty:
+            first_row = df.iloc[0]
+            chart = get_chart_img_component(first_row.get('ChartImagePath'), f"{first_row['GroupName']}_{first_row['ChartName']}_{first_row['ChartType']}")
+        else:
+            chart = html.Div("無資料")
+        # 回傳 layout 並預設圖
+        return f"歡迎，{user}!", external_layout
+    # 主頁內容
+    return f"歡迎，{user}!", get_main_layout_content()
+
+# 顯示指定圖片
+import os
+def get_chart_img_component(img_path, title=None):
+    if not img_path:
+        return html.Div("無對應圖檔。", style={"color": "red"})
+    web_path = f"http://127.0.0.1:5000/{img_path}"
+    return html.Div([
+        html.H5(title, className="mb-2") if title else None,
+        html.Img(src=web_path, style={"width": "100%", "maxHeight": "600px", "objectFit": "contain", "border": "1px solid #ccc", "background": "#fff"})
+    ])
+
+# 點選表格時切換左側圖
+from dash.dependencies import Input as DashInput, Output as DashOutput, State as DashState
+@callback(
+    DashOutput('external-spc-chart-area', 'children'),
+    DashInput('external-kpi-table', 'selected_rows'),
+    DashState('external-kpi-table', 'data')
+)
+def update_external_spc_chart(selected_rows, table_data):
+    if not table_data or not selected_rows:
+        return html.Div("請選擇一筆資料")
+    row = table_data[selected_rows[0]]
+    title = f"{row['GroupName']}_{row['ChartName']}_{row['ChartType']}"
+    return get_chart_img_component(row.get('ChartImagePath'), title)
 
 # Callback 處理登入
 @callback(
@@ -682,17 +780,7 @@ def handle_logout(logout_clicks):
         raise PreventUpdate
     return None, {'display': 'none'}, {'display': 'block'}
 
-# Callback 顯示導航欄使用者名稱及控制主頁面內容
-@callback(
-    Output('navbar-username', 'children'),
-    Output('page-content', 'children'),
-    Input('login-user', 'data'),
-    prevent_initial_call=False
-)
-def update_main_content(user):
-    if user:
-        return f"歡迎，{user}!", get_main_layout_content()
-    return "", html.Div()
+
 
 # Callback 填充左側FAB選擇器
 @callback(
@@ -733,10 +821,14 @@ def display_selected_fab(selected_fab, user):
     Input('groupname-filter', 'value'),
     Input('chartname-filter', 'value'),
     Input('charttype-filter', 'value'),
+    Input('url', 'pathname'),
     State('login-user', 'data'),
     prevent_initial_call=True
 )
-def render_kpi_table(selected_fab, module, groupname, chartname, charttype, user):
+def render_kpi_table(selected_fab, module, groupname, chartname, charttype, pathname, user):
+    from dash import no_update
+    if pathname != '/':
+        return [no_update] * 6
     if not user or not selected_fab:
         raise PreventUpdate
 
@@ -1418,6 +1510,7 @@ def save_modal_feedback(n_clicks, feedback_ids, feedback_values, action_ids, act
     return msg, dash.no_update
     return is_open, dash.no_update
 # --- 主程式區塊 ---
+
 if __name__ == '__main__':
     print("啟動 Dash 伺服器...")
     initialize_db()
